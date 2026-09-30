@@ -1,0 +1,170 @@
+<meta charset="utf-8">
+<title>Orb Glyph Dither</title>
+<style>
+  /* Layout: full-bleed WebGL canvas, floating control dock bottom-left (stacks on phones) */
+  :root {
+    color-scheme: dark;
+    --bg: #020208;
+    --panel: rgba(10, 12, 22, 0.78);
+    --line: rgba(94, 233, 255, 0.16);
+    --fg: #d9e4ff;
+    --muted: #7c89b0;
+    --accent: #5ee9ff;
+    --deep: #1f3dff;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    --sans: "Sora", system-ui, sans-serif;
+  }
+  html, body { height: 100%; }
+  body { background: var(--bg); color: var(--fg); font-family: var(--sans); overflow: hidden; }
+  #stage { position: fixed; inset: 0; }
+  #stage canvas { display: block; width: 100%; height: 100%; }
+  .dock {
+    position: fixed; left: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    width: min(320px, calc(100vw - 32px)); max-height: calc(100% - 32px); overflow-y: auto;
+    background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 10px; font-size: 12px;
+  }
+  .dock header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .dock h1 { margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.02em; }
+  .dock h1 span { color: var(--accent); }
+  .dock .hint { color: var(--muted); font-family: var(--mono); font-size: 10.5px; }
+  .row { display: grid; grid-template-columns: 108px 1fr 40px; align-items: center; gap: 8px; }
+  .row label { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .row output { font-family: var(--mono); font-size: 11px; text-align: right; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .colors { display: flex; gap: 10px; flex-wrap: wrap; }
+  .colors label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  input[type=color] { width: 26px; height: 20px; border: 1px solid var(--line); border-radius: 4px; background: none; padding: 0; }
+  .actions { display: flex; gap: 8px; }
+  button {
+    flex: 1; font: 600 11px var(--mono); color: var(--fg); background: transparent;
+    border: 1px solid var(--line); border-radius: 6px; padding: 7px 8px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  pre {
+    margin: 0; padding: 10px; background: rgba(0,0,0,0.45); border: 1px solid var(--line); border-radius: 6px;
+    font: 10.5px/1.5 var(--mono); color: var(--accent); overflow-x: auto; white-space: pre;
+  }
+  .checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  .checks label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  input[type=checkbox] { accent-color: var(--accent); }
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; }
+  .presets button { flex: 1 1 60px; }
+  .dock .body { display: flex; flex-direction: column; gap: 10px; }
+  .dock.collapsed .body { display: none; }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Sora:wght@400;600&display=swap">
+
+<div id="stage"></div>
+
+<aside class="dock" id="dock">
+  <header>
+    <h1>Orb <span>Glyph Dither</span></h1>
+    <button id="toggle" style="flex:0" aria-expanded="true">Ẩn</button>
+  </header>
+  <div class="body">
+    <div class="hint">Rê chuột vào orb để xoay · di chuột để phát sáng · click để tạo sóng</div>
+    <div class="colors">
+      <label>line 1 <input type="color" data-line="0" value="#0a14ff"></label>
+      <label>line 2 <input type="color" data-line="1" value="#1e6bff"></label>
+      <label>line 3 <input type="color" data-line="2" value="#5ef2ff"></label>
+      <label>bg <input type="color" id="backgroundColor" value="#020208"></label>
+    </div>
+    <div class="presets" id="presets"></div>
+    <div id="sliders" style="display:flex;flex-direction:column;gap:6px"></div>
+    <div class="checks" id="checks"></div>
+    <div class="actions">
+      <button id="reset">Mặc định</button>
+    </div>
+    <pre id="code"></pre>
+    <button id="copy">Copy JSX</button>
+  </div>
+</aside>
+
+<script type="module">
+  import { createOrb, ORB_DEFAULTS } from './orbDither.js';
+
+  const DEFAULTS = {
+    ...ORB_DEFAULTS,
+    hoverIntensity: 0.14,
+    backgroundColor: '#020208'
+  };
+  const RANGES = {
+    cellWidth: [3, 30, 1], cellHeight: [3, 30, 1], lineThickness: [0.1, 1, 0.05], levels: [1, 8, 1],
+    gap: [0, 10, 1], contrast: [0.5, 3, 0.05], rays: [0, 2, 0.05], hoverIntensity: [0, 1, 0.01],
+    mouseGlow: [0, 2, 0.05], hue: [0, 360, 1]
+  };
+  const CHECKS = ['dither', 'useSourceColor', 'rotateOnHover', 'forceHoverState', 'clickPulse'];
+  const PRESETS = {
+    Ocean:  { lineColors: ['#0a14ff', '#1e6bff', '#5ef2ff'], backgroundColor: '#020208' },
+    Ember:  { lineColors: ['#5a0a00', '#ff4a1c', '#ffd27a'], backgroundColor: '#0a0302' },
+    Matrix: { lineColors: ['#003b12', '#00b34a', '#b6ffcc'], backgroundColor: '#010603' },
+    Violet: { lineColors: ['#2a0a80', '#9c43fe', '#ffb3f5'], backgroundColor: '#100c4d' },
+    Mono:   { lineColors: ['#333333', '#9a9a9a', '#ffffff'], backgroundColor: '#000000' }
+  };
+  const state = structuredClone(DEFAULTS);
+
+  const orb = createOrb(document.getElementById('stage'), state);
+
+  // --- Controls ---
+  const sliders = document.getElementById('sliders');
+  for (const [k, [min, max, step]] of Object.entries(RANGES)) {
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = `<label for="${k}">${k}</label><input type="range" id="${k}" min="${min}" max="${max}" step="${step}"><output id="${k}-out"></output>`;
+    sliders.appendChild(row);
+    row.querySelector('input').addEventListener('input', e => { state[k] = +e.target.value; sync(); });
+  }
+  const checks = document.getElementById('checks');
+  for (const k of CHECKS) {
+    const label = document.createElement('label');
+    label.innerHTML = `<input type="checkbox" id="${k}"> ${k}`;
+    checks.appendChild(label);
+    label.querySelector('input').addEventListener('change', e => { state[k] = e.target.checked; sync(); });
+  }
+  const lineInputs = [...document.querySelectorAll('[data-line]')];
+  lineInputs.forEach((input, i) => input.addEventListener('input', e => {
+    state.lineColors = state.lineColors.map((c, j) => (j === i ? e.target.value : c)); sync();
+  }));
+  document.getElementById('backgroundColor').addEventListener('input', e => { state.backgroundColor = e.target.value; sync(); });
+
+  const presets = document.getElementById('presets');
+  for (const [name, p] of Object.entries(PRESETS)) {
+    const b = document.createElement('button'); b.textContent = name;
+    b.onclick = () => { state.lineColors = [...p.lineColors]; state.backgroundColor = p.backgroundColor; sync(); };
+    presets.appendChild(b);
+  }
+
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const jsx = () => {
+    const props = Object.entries(state).filter(([k, v]) => !same(v, ORB_DEFAULTS[k]))
+      .map(([k, v]) => typeof v === 'string' ? `  ${k}="${v}"` : Array.isArray(v) ? `  ${k}={${JSON.stringify(v).replaceAll('"', "'").replaceAll(',', ', ')}}` : `  ${k}={${v}}`);
+    return `<div style={{ width: '100%', height: 600, position: 'relative' }}>\n  <Orb${props.length ? '\n  ' + props.join('\n  ') + '\n  ' : ' '}/>\n</div>`;
+  };
+  function sync() {
+    for (const k of Object.keys(RANGES)) {
+      document.getElementById(k).value = state[k];
+      document.getElementById(k + '-out').textContent = state[k];
+    }
+    for (const k of CHECKS) document.getElementById(k).checked = state[k];
+    lineInputs.forEach((input, i) => (input.value = state.lineColors[i]));
+    document.getElementById('backgroundColor').value = state.backgroundColor;
+    document.body.style.background = state.backgroundColor;
+    document.getElementById('code').textContent = jsx();
+    orb.update(state);
+  }
+  sync();
+
+  document.getElementById('reset').onclick = () => { Object.assign(state, structuredClone(DEFAULTS)); sync(); };
+  const copyBtn = document.getElementById('copy');
+  copyBtn.onclick = () => {
+    navigator.clipboard.writeText(jsx()).then(() => { copyBtn.textContent = 'Đã copy'; },
+      () => { getSelection().selectAllChildren(document.getElementById('code')); copyBtn.textContent = 'Nhấn Ctrl/Cmd+C'; });
+    setTimeout(() => copyBtn.textContent = 'Copy JSX', 1600);
+  };
+  const toggle = document.getElementById('toggle'), dock = document.getElementById('dock');
+  toggle.onclick = () => { const c = dock.classList.toggle('collapsed'); toggle.textContent = c ? 'Hiện' : 'Ẩn'; toggle.setAttribute('aria-expanded', String(!c)); };
+  // click trên bảng điều khiển không tạo sóng
+  dock.addEventListener('pointerdown', e => e.stopPropagation());
+</script>
